@@ -13,6 +13,8 @@
 
 #include "unit-test.h"
 
+const int EXCEPTION_RC = 2;
+
 enum {
     TCP,
     TCP_PI,
@@ -62,6 +64,7 @@ int main(int argc, char *argv[])
     uint32_t old_byte_to_usec;
     int use_backend;
     int success = FALSE;
+    int old_slave;
 
     if (argc > 1) {
         if (strcmp(argv[1], "tcp") == 0) {
@@ -449,6 +452,8 @@ int main(int argc, char *argv[])
     ASSERT_TRUE(rc == -1 && errno == EMBMDATA, "");
 
     /** SLAVE REPLY **/
+    old_slave = modbus_get_slave(ctx);
+
     printf("\nTEST SLAVE REPLY:\n");
     modbus_set_slave(ctx, INVALID_SERVER_ID);
     rc = modbus_read_registers(ctx, UT_REGISTERS_ADDRESS,
@@ -458,8 +463,8 @@ int main(int argc, char *argv[])
         uint8_t raw_req[] = { INVALID_SERVER_ID, 0x03, 0x00, 0x01, 0x01, 0x01 };
         /* Too many points */
         uint8_t raw_invalid_req[] = { INVALID_SERVER_ID, 0x03, 0x00, 0x01, 0xFF, 0xFF };
-        const int RAW_REP_LENGTH = 7;
-        uint8_t raw_rep[] = { INVALID_SERVER_ID, 0x03, 0x04, 0, 0, 0, 0 };
+        const int RAW_RSP_LENGTH = 7;
+        uint8_t raw_rsp[] = { INVALID_SERVER_ID, 0x03, 0x04, 0, 0, 0, 0 };
         uint8_t rsp[MODBUS_RTU_MAX_ADU_LENGTH];
 
         /* No response in RTU mode */
@@ -475,7 +480,7 @@ int main(int argc, char *argv[])
          * slave will see the indication message then the confirmation, and it must
          * ignore both. */
         modbus_send_raw_request(ctx, raw_req, RAW_REQ_LENGTH * sizeof(uint8_t));
-        modbus_send_raw_request(ctx, raw_rep, RAW_REP_LENGTH * sizeof(uint8_t));
+        modbus_send_raw_request(ctx, raw_rsp, RAW_RSP_LENGTH * sizeof(uint8_t));
         rc = modbus_receive_confirmation(ctx, rsp);
 
         printf("1-B/3 No response from slave %d on indication/confirmation messages: ",
@@ -504,11 +509,7 @@ int main(int argc, char *argv[])
     ASSERT_TRUE(rc == -1 && errno == ETIMEDOUT, "");
 
     /* Restore slave */
-    if (use_backend == RTU) {
-        modbus_set_slave(ctx, SERVER_ID);
-    } else {
-        modbus_set_slave(ctx, MODBUS_TCP_SLAVE);
-    }
+    modbus_set_slave(ctx, old_slave);
 
     printf("3/3 Response with an invalid TID or slave: ");
     rc = modbus_read_registers(ctx, UT_REGISTERS_ADDRESS_INVALID_TID_OR_SLAVE,
@@ -698,9 +699,9 @@ int test_server(modbus_t *ctx, int use_backend)
     int i;
     /* Read requests */
     const int READ_RAW_REQ_LEN = 6;
+    const int slave = (use_backend == RTU) ? SERVER_ID : MODBUS_TCP_SLAVE;
     uint8_t read_raw_req[] = {
-        /* slave */
-        (use_backend == RTU) ? SERVER_ID : 0xFF,
+        slave,
         /* function, address, 5 values */
         MODBUS_FC_READ_HOLDING_REGISTERS,
         UT_REGISTERS_ADDRESS >> 8, UT_REGISTERS_ADDRESS & 0xFF,
@@ -709,8 +710,7 @@ int test_server(modbus_t *ctx, int use_backend)
     /* Write and read registers request */
     const int RW_RAW_REQ_LEN = 13;
     uint8_t rw_raw_req[] = {
-        /* slave */
-        (use_backend == RTU) ? SERVER_ID : 0xFF,
+        slave,
         /* function, addr to read, nb to read */
         MODBUS_FC_WRITE_AND_READ_REGISTERS,
         /* Read */
@@ -727,8 +727,7 @@ int test_server(modbus_t *ctx, int use_backend)
     };
     const int WRITE_RAW_REQ_LEN = 13;
     uint8_t write_raw_req[] = {
-        /* slave */
-        (use_backend == RTU) ? SERVER_ID : 0xFF,
+        slave,
         /* function will be set in the loop */
         MODBUS_FC_WRITE_MULTIPLE_REGISTERS,
         /* Address */
@@ -738,6 +737,12 @@ int test_server(modbus_t *ctx, int use_backend)
         /* Dummy data to write */
         0x02, 0x2B, 0x00, 0x01, 0x00, 0x64
     };
+    const int INVALID_FC = 0x42;
+    const int INVALID_FC_REQ_LEN = 6;
+    uint8_t invalid_fc_raw_req[] = {
+        slave, 0x42, 0x00, 0x00, 0x00, 0x00
+    };
+
     int req_length;
     uint8_t rsp[MODBUS_TCP_MAX_ADU_LENGTH];
     int tab_read_function[] = {
@@ -764,6 +769,17 @@ int test_server(modbus_t *ctx, int use_backend)
     }
 
     printf("\nTEST RAW REQUESTS:\n");
+
+    uint32_t old_response_to_sec;
+    uint32_t old_response_to_usec;
+
+    /* This requests can generate flushes server side so we need a higher
+     * response timeout than the server. The server uses the defined response
+     * timeout to sleep before flushing.
+     * The old timeouts are restored at the end.
+     */
+    modbus_get_response_timeout(ctx, &old_response_to_sec, &old_response_to_usec);
+    modbus_set_response_timeout(ctx, 0, 600000);
 
     req_length = modbus_send_raw_request(ctx, read_raw_req, READ_RAW_REQ_LEN);
     printf("* modbus_send_raw_request: ");
@@ -808,8 +824,17 @@ int test_server(modbus_t *ctx, int use_backend)
     if (rc == -1)
         goto close;
 
+    /* Test invalid function code */
+    modbus_send_raw_request(ctx, invalid_fc_raw_req, INVALID_FC_REQ_LEN * sizeof(uint8_t));
+    rc = modbus_receive_confirmation(ctx, rsp);
+    printf("Return an exception on unknown function code: ");
+    ASSERT_TRUE(rc == (backend_length + EXCEPTION_RC) &&
+                rsp[backend_offset] == (0x80 + INVALID_FC), "")
+
+    modbus_set_response_timeout(ctx, old_response_to_sec, old_response_to_usec);
     return 0;
 close:
+    modbus_set_response_timeout(ctx, old_response_to_sec, old_response_to_usec);
     return -1;
 }
 
@@ -819,19 +844,8 @@ int send_crafted_request(modbus_t *ctx, int function,
                          uint16_t max_value, uint16_t bytes,
                          int backend_length, int backend_offset)
 {
-    const int EXCEPTION_RC = 2;
     uint8_t rsp[MODBUS_TCP_MAX_ADU_LENGTH];
     int j;
-    uint32_t old_response_to_sec;
-    uint32_t old_response_to_usec;
-
-    /* This requests can generate flushes server side so we need a higher
-     * response timeout than the server. The server uses the defined response
-     * timeout to sleep before flushing.
-     * The old timeouts are restored at the end.
-     */
-    modbus_get_response_timeout(ctx, &old_response_to_sec, &old_response_to_usec);
-    modbus_set_response_timeout(ctx, 0, 600000);
 
     for (j=0; j<2; j++) {
         int rc;
@@ -867,9 +881,7 @@ int send_crafted_request(modbus_t *ctx, int function,
                     rsp[backend_offset] == (0x80 + function) &&
                     rsp[backend_offset + 1] == MODBUS_EXCEPTION_ILLEGAL_DATA_VALUE, "");
     }
-    modbus_set_response_timeout(ctx, old_response_to_sec, old_response_to_usec);
     return 0;
 close:
-    modbus_set_response_timeout(ctx, old_response_to_sec, old_response_to_usec);
     return -1;
 }
