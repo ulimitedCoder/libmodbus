@@ -62,7 +62,8 @@ typedef struct _modbus_serial {
 #endif
 #if HAVE_DECL_TIOCM_RTS
     int rts;
-    int rts_delay;
+    int rts_delay_before_ms;
+    int rts_delay_after_ms;
     int onebyte_time;
     void (*set_rts) (modbus_t *ctx, int on);
 #endif

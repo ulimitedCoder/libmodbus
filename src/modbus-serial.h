@@ -20,9 +20,6 @@ MODBUS_API int modbus_serial_get_serial_mode(modbus_t *ctx);
 MODBUS_API int modbus_serial_set_rts(modbus_t *ctx, int mode);
 MODBUS_API int modbus_serial_get_rts(modbus_t *ctx);
 
-MODBUS_API int modbus_serial_set_custom_rts(modbus_t *ctx, void (*set_rts) (modbus_t *ctx, int on));
-
-MODBUS_API int modbus_serial_set_rts_delay(modbus_t *ctx, int us);
-MODBUS_API int modbus_serial_get_rts_delay(modbus_t *ctx);
+int modbus_serial_set_rts_delay(modbus_t *ctx, int msBefore, int msAfter);
 
 #endif /* MODBUS_SERIAL_H */

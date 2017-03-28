@@ -125,24 +125,24 @@ ssize_t _modbus_serial_send(modbus_t *ctx, const uint8_t *req, int req_length)
     return (WriteFile(ctx_serial->w_ser.fd, req, req_length, &n_bytes, NULL)) ? (ssize_t)n_bytes : -1;
 #else
 #if HAVE_DECL_TIOCM_RTS
-    modbus_serial_t *ctx_serial = ctx->backend_data;
-    if (ctx_serial->rts != MODBUS_SERIAL_RTS_NONE) {
-        ssize_t size;
+    modbus_serial_t *ctx_serial     = ctx->backend_data;
+    int             rtsBeforems     = ctx_serial->onebyte_time * req_length + ctx_serial->rts_delay_before_ms;
 
+    if (ctx_serial->rts != MODBUS_SERIAL_RTS_NONE)
+    {
         if (ctx->debug) {
             fprintf(stderr, "Sending request using RTS signal\n");
         }
 
-        ctx_serial->set_rts(ctx, ctx_serial->rts == MODBUS_SERIAL_RTS_UP);
-        usleep(ctx_serial->rts_delay);
+        /*Set RTS Driver enable active state and set delay for before and after send*/
+        ctx_serial->set_rts(ctx, ctx_serial->rts);
+        modbus_serial_set_rts_delay(ctx, -1, rtsBeforems);
 
-        size = write(ctx->s, req, req_length);
+        return write(ctx->s, req, req_length);
 
-        usleep(ctx_serial->onebyte_time * req_length + ctx_serial->rts_delay);
-        ctx_serial->set_rts(ctx, ctx_serial->rts != MODBUS_SERIAL_RTS_UP);
-
-        return size;
-    } else {
+    }
+    else
+    {
 #endif
         return write(ctx->s, req, req_length);
 #if HAVE_DECL_TIOCM_RTS
@@ -721,7 +721,18 @@ int modbus_serial_set_serial_mode(modbus_t *ctx, int mode)
         memset(&rs485conf, 0x0, sizeof(struct serial_rs485));
 
         if (mode == MODBUS_RTU_RS485) {
+
             rs485conf.flags = SER_RS485_ENABLED;
+
+            /*Set RTS driver enable active high*/
+            ctx_serial->rts = MODBUS_SERIAL_RTS_UP;
+            rs485conf.flags |= SER_RS485_RTS_ON_SEND;
+            rs485conf.flags &= ~(SER_RS485_RTS_AFTER_SEND);
+
+            /* Set rts delay before and after send*/
+            rs485conf.delay_rts_before_send = ctx_serial->rts_delay_before_ms;
+            rs485conf.delay_rts_after_send = ctx_serial->rts_delay_after_ms;
+
             if (ioctl(ctx->s, TIOCSRS485, &rs485conf) < 0) {
                 return -1;
             }
@@ -790,7 +801,7 @@ int modbus_serial_set_rts(modbus_t *ctx, int mode)
             ctx_serial->rts = mode;
 
             /* Set the RTS bit in order to not reserve the RS485 bus */
-            ctx_serial->set_rts(ctx, ctx_serial->rts != MODBUS_SERIAL_RTS_UP);
+            ctx_serial->set_rts(ctx, ctx_serial->rts );
 
             return 0;
         } else {
@@ -834,7 +845,7 @@ int modbus_serial_get_rts(modbus_t *ctx)
     }
 }
 
-int modbus_serial_set_custom_rts(modbus_t *ctx, void (*set_rts) (modbus_t *ctx, int on))
+int modbus_serial_set_rts_delay(modbus_t *ctx, int msBefore, int msAfter)
 {
     if (ctx == NULL) {
         errno = EINVAL;
@@ -843,60 +854,35 @@ int modbus_serial_set_custom_rts(modbus_t *ctx, void (*set_rts) (modbus_t *ctx, 
 
     if (ctx->backend->backend_type == _MODBUS_BACKEND_TYPE_SERIAL) {
 #if HAVE_DECL_TIOCM_RTS
-        modbus_serial_t *ctx_serial = ctx->backend_data;
-        ctx_serial->set_rts = set_rts;
-        return 0;
-#else
-        if (ctx->debug) {
-            fprintf(stderr, "This function isn't supported on your platform\n");
+        modbus_serial_t         *ctx_serial = (modbus_serial_t *)ctx->backend_data;;
+        int                     fd          = ctx->s;
+        struct serial_rs485     rs485conf;
+
+        memset(&rs485conf, 0, sizeof(struct serial_rs485));
+
+        if(msBefore >= 0)
+        {
+            ctx_serial->rts_delay_before_ms = msBefore;
         }
-        errno = ENOTSUP;
-        return -1;
-#endif
-    } else {
-        errno = EINVAL;
-        return -1;
-    }
-}
 
-int modbus_serial_set_rts_delay(modbus_t *ctx, int us)
-{
-    if (ctx == NULL || us < 0) {
-        errno = EINVAL;
-        return -1;
-    }
-
-    if (ctx->backend->backend_type == _MODBUS_BACKEND_TYPE_SERIAL) {
-#if HAVE_DECL_TIOCM_RTS
-        modbus_serial_t *ctx_serial;
-        ctx_serial = (modbus_serial_t *)ctx->backend_data;
-        ctx_serial->rts_delay = us;
-        return 0;
-#else
-        if (ctx->debug) {
-            fprintf(stderr, "This function isn't supported on your platform\n");
+        if(msAfter >= 0)
+        {
+            ctx_serial->rts_delay_after_ms  = msAfter;
         }
-        errno = ENOTSUP;
-        return -1;
-#endif
-    } else {
-        errno = EINVAL;
-        return -1;
-    }
-}
 
-int modbus_serial_get_rts_delay(modbus_t *ctx)
-{
-    if (ctx == NULL) {
-        errno = EINVAL;
-        return -1;
-    }
+        if(ioctl(fd, TIOCGRS485, &rs485conf) < 0)
+        {
+            return -1;
+        }
 
-    if (ctx->backend->backend_type == _MODBUS_BACKEND_TYPE_SERIAL) {
-#if HAVE_DECL_TIOCM_RTS
-        modbus_serial_t *ctx_serial;
-        ctx_serial = (modbus_serial_t *)ctx->backend_data;
-        return ctx_serial->rts_delay;
+        /* Set rts delay before send*/
+        rs485conf.delay_rts_before_send = ctx_serial->rts_delay_before_ms;
+
+        /* Set rts delay after send. This will be calculate before sending data*/
+        rs485conf.delay_rts_after_send = ctx_serial->rts_delay_after_ms;
+
+        return ioctl(fd, TIOCSRS485, &rs485conf);
+
 #else
         if (ctx->debug) {
             fprintf(stderr, "This function isn't supported on your platform\n");
@@ -1011,16 +997,30 @@ void _modbus_serial_free(modbus_serial_t *ctx_serial)
 #if HAVE_DECL_TIOCM_RTS
 static void _modbus_serial_ioctl_rts(modbus_t *ctx, int on)
 {
-    int fd = ctx->s;
-    int flags;
+    int                     fd          = ctx->s;
+    struct serial_rs485     rs485conf;
+    
+    memset(&rs485conf, 0, sizeof(struct serial_rs485));
+    ioctl (fd, TIOCGRS485, &rs485conf);
 
-    ioctl(fd, TIOCMGET, &flags);
-    if (on) {
-        flags |= TIOCM_RTS;
-    } else {
-        flags &= ~TIOCM_RTS;
+    if( MODBUS_SERIAL_RTS_UP == on)
+    {
+        /* Set logical level for RTS pin equal to 1 when sending: */
+        rs485conf.flags |= SER_RS485_RTS_ON_SEND;
+        
+        /* set logical level for RTS pin equal to 0 after sending: */
+        rs485conf.flags &= ~(SER_RS485_RTS_AFTER_SEND);
     }
-    ioctl(fd, TIOCMSET, &flags);
+    else if(MODBUS_SERIAL_RTS_DOWN == on)
+    {
+        /* Set logical level for RTS pin equal to 0 when sending: */
+        rs485conf.flags &= ~(SER_RS485_RTS_ON_SEND);
+        
+        /* set logical level for RTS pin equal to 1 after sending: */
+        rs485conf.flags |= SER_RS485_RTS_AFTER_SEND;
+    }
+    
+    ioctl(fd, TIOCSRS485, &rs485conf);
 }
 #endif
 
@@ -1084,7 +1084,8 @@ modbus_t* _modbus_serial_new(const modbus_backend_t *modbus_backend, const char 
     ctx_serial->set_rts = _modbus_serial_ioctl_rts;
 
     /* The delay before and after transmission when toggling the RTS pin */
-    ctx_serial->rts_delay = ctx_serial->onebyte_time;
+    ctx_serial->rts_delay_before_ms = ctx_serial->onebyte_time;
+    ctx_serial->rts_delay_after_ms = ctx_serial->onebyte_time;
 #endif
 
     ctx_serial->confirmation_to_ignore = FALSE;
