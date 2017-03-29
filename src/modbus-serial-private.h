@@ -64,7 +64,6 @@ typedef struct _modbus_serial {
     int rts;
     int rts_delay_before_ms;
     int rts_delay_after_ms;
-    int onebyte_time;
     void (*set_rts) (modbus_t *ctx, int on);
 #endif
     /* To handle many slaves on the same link */

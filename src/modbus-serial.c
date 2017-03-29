@@ -124,30 +124,7 @@ ssize_t _modbus_serial_send(modbus_t *ctx, const uint8_t *req, int req_length)
     DWORD n_bytes = 0;
     return (WriteFile(ctx_serial->w_ser.fd, req, req_length, &n_bytes, NULL)) ? (ssize_t)n_bytes : -1;
 #else
-#if HAVE_DECL_TIOCM_RTS
-    modbus_serial_t *ctx_serial     = ctx->backend_data;
-    int             rtsBeforems     = ctx_serial->onebyte_time * req_length + ctx_serial->rts_delay_before_ms;
-
-    if (ctx_serial->rts != MODBUS_SERIAL_RTS_NONE)
-    {
-        if (ctx->debug) {
-            fprintf(stderr, "Sending request using RTS signal\n");
-        }
-
-        /*Set RTS Driver enable active state and set delay for before and after send*/
-        ctx_serial->set_rts(ctx, ctx_serial->rts);
-        modbus_serial_set_rts_delay(ctx, -1, rtsBeforems);
-
-        return write(ctx->s, req, req_length);
-
-    }
-    else
-    {
-#endif
-        return write(ctx->s, req, req_length);
-#if HAVE_DECL_TIOCM_RTS
-    }
-#endif
+    return write(ctx->s, req, req_length);
 #endif
 }
 
@@ -1077,15 +1054,12 @@ modbus_t* _modbus_serial_new(const modbus_backend_t *modbus_backend, const char 
     /* The RTS use has been set by default */
     ctx_serial->rts = MODBUS_SERIAL_RTS_NONE;
 
-    /* Calculate estimated time in micro second to send one byte */
-    ctx_serial->onebyte_time = (1000 * 1000) * (1 + data_bit + (parity == 'N' ? 0 : 1) + stop_bit) / baud;
-
     /* The internal function is used by default to set RTS */
     ctx_serial->set_rts = _modbus_serial_ioctl_rts;
 
     /* The delay before and after transmission when toggling the RTS pin */
-    ctx_serial->rts_delay_before_ms = ctx_serial->onebyte_time;
-    ctx_serial->rts_delay_after_ms = ctx_serial->onebyte_time;
+    ctx_serial->rts_delay_before_ms = 0;
+    ctx_serial->rts_delay_after_ms = 0;
 #endif
 
     ctx_serial->confirmation_to_ignore = FALSE;
